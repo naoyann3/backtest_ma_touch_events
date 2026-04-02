@@ -7,15 +7,19 @@ on:
         description: "yfinance history period (example: 5y, 7y)"
         required: false
         default: "5y"
-      max_tickers:
-        description: "Optional ticker limit (0 = all)"
+      offset:
+        description: "Start offset in tickers.csv (0-based)"
         required: false
         default: "0"
+      limit:
+        description: "How many tickers to process from offset"
+        required: false
+        default: "1000"
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     env:
       TZ: Asia/Tokyo
@@ -37,17 +41,20 @@ jobs:
       - name: Set run date
         run: |
           echo "RUN_DATE=$(date +%F)" >> $GITHUB_ENV
+          echo "RUN_OFFSET=${{ github.event.inputs.offset || '0' }}" >> $GITHUB_ENV
+          echo "RUN_LIMIT=${{ github.event.inputs.limit || '1000' }}" >> $GITHUB_ENV
 
       - name: Run MA touch backtest
         run: |
           python backtest_ma_touch_events.py \
             --period "${{ github.event.inputs.period || '5y' }}" \
-            --max-tickers "${{ github.event.inputs.max_tickers || '0' }}"
+            --offset "${{ github.event.inputs.offset || '0' }}" \
+            --limit "${{ github.event.inputs.limit || '1000' }}"
 
       - name: Upload backtest results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ma-touch-backtest-results-${{ env.RUN_DATE }}
+          name: ma-touch-backtest-results-${{ env.RUN_DATE }}-o${{ env.RUN_OFFSET }}-l${{ env.RUN_LIMIT }}
           path: |
             results/ma_touch_backtests/*.csv
