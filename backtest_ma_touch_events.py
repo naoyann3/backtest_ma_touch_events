@@ -26,17 +26,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--period", default="5y", help="yfinance history period. Default: 5y")
     parser.add_argument("--min-history", type=int, default=260, help="Minimum required rows per ticker.")
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional limit for number of tickers.")
+    parser.add_argument("--offset", type=int, default=0, help="Start offset in ticker universe.")
+    parser.add_argument("--limit", type=int, default=0, help="Optional slice size from offset (0 = no limit).")
     return parser.parse_args()
 
 
-def load_tickers(path: Path, max_tickers: int) -> pd.DataFrame:
+def load_tickers(path: Path, max_tickers: int, offset: int, limit: int) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.dropna(subset=["ticker"]).copy()
     df["ticker"] = df["ticker"].astype(str).str.strip()
     if "name" not in df.columns:
         df["name"] = df["ticker"]
-    if max_tickers and max_tickers > 0:
-        df = df.head(max_tickers)
+    offset = max(offset, 0)
+    if limit and limit > 0:
+        df = df.iloc[offset : offset + limit]
+    elif max_tickers and max_tickers > 0:
+        df = df.iloc[offset : offset + max_tickers]
+    elif offset > 0:
+        df = df.iloc[offset:]
     return df.reset_index(drop=True)
 
 
@@ -216,8 +223,14 @@ def run() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tickers_df = load_tickers(tickers_path, args.max_tickers)
+    tickers_df = load_tickers(tickers_path, args.max_tickers, args.offset, args.limit)
     all_events: list[dict] = []
+
+    slice_label = f"offset{args.offset}"
+    if args.limit and args.limit > 0:
+        slice_label += f"_limit{args.limit}"
+    elif args.max_tickers and args.max_tickers > 0:
+        slice_label += f"_limit{args.max_tickers}"
 
     for i, row in tickers_df.iterrows():
         ticker = row["ticker"]
@@ -234,6 +247,9 @@ def run() -> None:
     events_df = pd.DataFrame(all_events)
     details_path = output_dir / DETAILS_CSV
     summary_path = output_dir / SUMMARY_CSV
+    if args.offset > 0 or (args.limit and args.limit > 0) or (args.max_tickers and args.max_tickers > 0):
+        details_path = output_dir / f"ma_touch_event_details_{slice_label}.csv"
+        summary_path = output_dir / f"ma_touch_event_summary_{slice_label}.csv"
     events_df.to_csv(details_path, index=False, encoding="utf-8-sig")
 
     summary_df = summarize_events(events_df)
