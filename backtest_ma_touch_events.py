@@ -15,6 +15,8 @@ SUMMARY_CSV = "ma_touch_event_summary.csv"
 FORWARD_WINDOWS = (5, 10, 20, 60)
 DEFAULT_EVENT_COOLDOWN_DAYS = 20
 DEFAULT_MAX_ABS_RETURN_PCT = 300.0
+DEFAULT_MIN_MEDIAN_TRADED_VALUE_20_MN = 100.0
+DEFAULT_MIN_CLOSE_PRICE = 300.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +43,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MAX_ABS_RETURN_PCT,
         help="Ignore forward returns and runups/drawdowns whose absolute value exceeds this threshold.",
+    )
+    parser.add_argument(
+        "--min-median-traded-value-20-mn",
+        type=float,
+        default=DEFAULT_MIN_MEDIAN_TRADED_VALUE_20_MN,
+        help="Skip events whose 20-day median traded value (million JPY) is below this threshold.",
+    )
+    parser.add_argument(
+        "--min-close-price",
+        type=float,
+        default=DEFAULT_MIN_CLOSE_PRICE,
+        help="Skip events whose signal-day close is below this price.",
     )
     return parser.parse_args()
 
@@ -161,6 +175,10 @@ def _event_record(
         if pd.notna(signal_row["drawdown_from_60d_high_pct"])
         else None,
         "volume_ratio_20": round(float(signal_row["volume_ratio_20"]), 3) if pd.notna(signal_row["volume_ratio_20"]) else None,
+        "traded_value_mn": round(float(signal_row["traded_value_mn"]), 3) if pd.notna(signal_row["traded_value_mn"]) else None,
+        "median_traded_value_20_mn": round(float(signal_row["median_traded_value_20_mn"]), 3)
+        if pd.notna(signal_row["median_traded_value_20_mn"])
+        else None,
         "upper_shadow_pct": round(float(signal_row["upper_shadow_pct"]), 3) if pd.notna(signal_row["upper_shadow_pct"]) else None,
         "lower_shadow_pct": round(float(signal_row["lower_shadow_pct"]), 3) if pd.notna(signal_row["lower_shadow_pct"]) else None,
         "stop_price": round(float(stop_price), 3) if stop_price is not None else None,
@@ -183,12 +201,23 @@ def build_events(
     name: str,
     event_cooldown_days: int,
     max_abs_return_pct: float,
+    min_median_traded_value_20_mn: float,
+    min_close_price: float,
 ) -> list[dict]:
     events: list[dict] = []
     last_event_idx: dict[str, int] = {}
 
     for idx in range(200, len(df) - max(FORWARD_WINDOWS)):
         row = df.iloc[idx]
+        median_traded_value_20_mn = (
+            float(row["median_traded_value_20_mn"]) if pd.notna(row["median_traded_value_20_mn"]) else 0.0
+        )
+        signal_close = float(row["Close"])
+        if median_traded_value_20_mn < min_median_traded_value_20_mn:
+            continue
+        if signal_close < min_close_price:
+            continue
+
         touch_types = []
         if bool(row["touch_ma25_intraday"]):
             touch_types.append(("ma25", float(row["ma25"]) if pd.notna(row["ma25"]) else None))
@@ -204,6 +233,8 @@ def build_events(
         next_row = df.iloc[next_idx]
         confirm_next_close = bool(next_row["Close"] > next_row["Open"])
         confirm_high_break = bool(next_row["High"] > row["High"])
+        next_close_above_signal_close = bool(next_row["Close"] >= row["Close"])
+        next_volume_ratio_20 = float(next_row["volume_ratio_20"]) if pd.notna(next_row["volume_ratio_20"]) else 0.0
 
         for touch_type, stop_ref in touch_types:
             previous_idx = last_event_idx.get(touch_type)
@@ -229,12 +260,22 @@ def build_events(
 
             lower_shadow_pct = float(row["lower_shadow_pct"]) if pd.notna(row["lower_shadow_pct"]) else 0.0
             volume_ratio_20 = float(row["volume_ratio_20"]) if pd.notna(row["volume_ratio_20"]) else 0.0
-            signal_absorption = bool(row.get("support_reaction_ok", False)) or lower_shadow_pct >= 1.0 or volume_ratio_20 >= 1.2
+            signal_absorption = (
+                bool(row.get("support_reaction_ok", False))
+                or lower_shadow_pct >= 1.5
+                or volume_ratio_20 >= 1.5
+            )
             next_hold_low = bool(next_row["Low"] >= row["Low"])
-            next_follow_through = confirm_next_close and bool(next_row["Close"] >= row["Close"]) and next_hold_low
+            next_follow_through = (
+                confirm_next_close
+                and next_close_above_signal_close
+                and next_hold_low
+                and next_close_above_ma
+            )
+            follow_through_volume = next_volume_ratio_20 >= 1.0
 
-            confirmed = (signal_reclaim and signal_absorption and next_follow_through) or (
-                confirm_high_break and next_follow_through and next_close_above_ma
+            confirmed = (signal_reclaim and signal_absorption and next_follow_through and follow_through_volume) or (
+                confirm_high_break and next_follow_through and (signal_absorption or follow_through_volume)
             )
 
             if confirmed:
@@ -314,12 +355,16 @@ def run() -> None:
             continue
 
         enriched = calc_indicators(hist)
+        enriched["traded_value_mn"] = (enriched["Close"] * enriched["Volume"]) / 1_000_000
+        enriched["median_traded_value_20_mn"] = enriched["traded_value_mn"].rolling(20).median()
         events = build_events(
             enriched,
             ticker,
             name,
             event_cooldown_days=max(args.event_cooldown_days, 1),
             max_abs_return_pct=max(args.max_abs_return_pct, 1.0),
+            min_median_traded_value_20_mn=max(args.min_median_traded_value_20_mn, 0.0),
+            min_close_price=max(args.min_close_price, 0.0),
         )
         all_events.extend(events)
 
