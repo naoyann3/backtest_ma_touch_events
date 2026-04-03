@@ -14,7 +14,7 @@ DETAILS_CSV = "ma_touch_event_details.csv"
 SUMMARY_CSV = "ma_touch_event_summary.csv"
 FORWARD_WINDOWS = (5, 10, 20, 60)
 DEFAULT_EVENT_COOLDOWN_DAYS = 20
-DEFAULT_MAX_ABS_RETURN_PCT = 300.0
+DEFAULT_MAX_ABS_RETURN_PCT = 200.0
 DEFAULT_MIN_MEDIAN_TRADED_VALUE_20_MN = 100.0
 DEFAULT_MIN_CLOSE_PRICE = 300.0
 
@@ -166,6 +166,11 @@ def _event_record(
         "reclaim_ma25_close": bool(signal_row["reclaim_ma25_close"]),
         "reclaim_ma75_close": bool(signal_row["reclaim_ma75_close"]),
         "support_reaction_ok": bool(signal_row.get("support_reaction_ok", False)),
+        "trend_filter_ok": bool(signal_row.get("trend_filter_ok", False)),
+        "volume_filter_ok": bool(signal_row.get("volume_filter_ok", False)),
+        "support_trace_ok": bool(signal_row.get("support_trace_ok", False)),
+        "drawdown_filter_ok": bool(signal_row.get("drawdown_filter_ok", False)),
+        "quality_filter_ok": bool(signal_row.get("quality_filter_ok", False)),
         "ma25_slope_pct": round(float(signal_row["ma25_slope_pct"]), 3) if pd.notna(signal_row["ma25_slope_pct"]) else None,
         "ma75_slope_pct": round(float(signal_row["ma75_slope_pct"]), 3) if pd.notna(signal_row["ma75_slope_pct"]) else None,
         "ma200_slope_pct": round(float(signal_row["ma200_slope_pct"]), 3) if pd.notna(signal_row["ma200_slope_pct"]) else None,
@@ -250,6 +255,34 @@ def build_events(
                     df, idx, ticker, name, touch_type, "next_close", next_idx, stop_price, max_abs_return_pct
                 )
             )
+
+            if touch_type == "ma75" and bool(row.get("quality_filter_ok", False)):
+                events.append(
+                    _event_record(
+                        df,
+                        idx,
+                        ticker,
+                        name,
+                        touch_type,
+                        "touch_close_quality",
+                        idx,
+                        stop_price,
+                        max_abs_return_pct,
+                    )
+                )
+                events.append(
+                    _event_record(
+                        df,
+                        idx,
+                        ticker,
+                        name,
+                        touch_type,
+                        "next_close_quality",
+                        next_idx,
+                        stop_price,
+                        max_abs_return_pct,
+                    )
+                )
 
             if touch_type == "ma25":
                 signal_reclaim = bool(row["reclaim_ma25_close"])
@@ -357,6 +390,21 @@ def run() -> None:
         enriched = calc_indicators(hist)
         enriched["traded_value_mn"] = (enriched["Close"] * enriched["Volume"]) / 1_000_000
         enriched["median_traded_value_20_mn"] = enriched["traded_value_mn"].rolling(20).median()
+        support_reaction_series = (
+            enriched["support_reaction_ok"] if "support_reaction_ok" in enriched.columns else pd.Series(False, index=enriched.index)
+        )
+        enriched["trend_filter_ok"] = (enriched["ma200_slope_pct"] > 0).fillna(False)
+        enriched["volume_filter_ok"] = (enriched["volume_ratio_20"] >= 1.0).fillna(False)
+        enriched["support_trace_ok"] = (support_reaction_series.fillna(False) | (enriched["lower_shadow_pct"] >= 1.0).fillna(False))
+        enriched["drawdown_filter_ok"] = (
+            enriched["drawdown_from_60d_high_pct"].between(-20.0, -2.0, inclusive="both").fillna(False)
+        )
+        enriched["quality_filter_ok"] = (
+            enriched["trend_filter_ok"]
+            & enriched["volume_filter_ok"]
+            & enriched["support_trace_ok"]
+            & enriched["drawdown_filter_ok"]
+        )
         events = build_events(
             enriched,
             ticker,
