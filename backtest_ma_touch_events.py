@@ -13,6 +13,8 @@ from market_data_utils import prepare_price_history
 DETAILS_CSV = "ma_touch_event_details.csv"
 SUMMARY_CSV = "ma_touch_event_summary.csv"
 FORWARD_WINDOWS = (5, 10, 20, 60)
+DEFAULT_EVENT_COOLDOWN_DAYS = 20
+DEFAULT_MAX_ABS_RETURN_PCT = 300.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +30,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tickers", type=int, default=0, help="Optional limit for number of tickers.")
     parser.add_argument("--offset", type=int, default=0, help="Start offset in ticker universe.")
     parser.add_argument("--limit", type=int, default=0, help="Optional slice size from offset (0 = no limit).")
+    parser.add_argument(
+        "--event-cooldown-days",
+        type=int,
+        default=DEFAULT_EVENT_COOLDOWN_DAYS,
+        help="Minimum spacing between events for the same ticker/touch type.",
+    )
+    parser.add_argument(
+        "--max-abs-return-pct",
+        type=float,
+        default=DEFAULT_MAX_ABS_RETURN_PCT,
+        help="Ignore forward returns and runups/drawdowns whose absolute value exceeds this threshold.",
+    )
     return parser.parse_args()
 
 
@@ -57,27 +71,42 @@ def fetch_history(ticker: str, period: str) -> pd.DataFrame | None:
     return prepare_price_history(hist)
 
 
-def _future_return(df: pd.DataFrame, idx: int, horizon: int) -> float | None:
+def _sanitize_return(value: float, max_abs_return_pct: float) -> float | None:
+    if not pd.notna(value):
+        return None
+    if abs(value) > max_abs_return_pct:
+        return None
+    return round(value, 3)
+
+
+def _future_return(df: pd.DataFrame, idx: int, horizon: int, max_abs_return_pct: float) -> float | None:
     target_idx = idx + horizon
     if target_idx >= len(df):
         return None
     entry = float(df.iloc[idx]["Close"])
     exit_ = float(df.iloc[target_idx]["Close"])
-    return round((exit_ - entry) / entry * 100, 3)
+    if entry <= 0:
+        return None
+    raw = (exit_ - entry) / entry * 100
+    return _sanitize_return(raw, max_abs_return_pct)
 
 
-def _max_runup_drawdown(df: pd.DataFrame, idx: int, horizon: int) -> tuple[float | None, float | None]:
+def _max_runup_drawdown(
+    df: pd.DataFrame, idx: int, horizon: int, max_abs_return_pct: float
+) -> tuple[float | None, float | None]:
     end_idx = min(idx + horizon, len(df) - 1)
     if idx + 1 > end_idx:
         return None, None
     entry = float(df.iloc[idx]["Close"])
+    if entry <= 0:
+        return None, None
     window = df.iloc[idx + 1 : end_idx + 1]
     if window.empty:
         return None, None
     max_high = float(window["High"].max())
     min_low = float(window["Low"].min())
-    runup = round((max_high - entry) / entry * 100, 3)
-    drawdown = round((min_low - entry) / entry * 100, 3)
+    runup = _sanitize_return((max_high - entry) / entry * 100, max_abs_return_pct)
+    drawdown = _sanitize_return((min_low - entry) / entry * 100, max_abs_return_pct)
     return runup, drawdown
 
 
@@ -102,6 +131,7 @@ def _event_record(
     entry_rule: str,
     entry_idx: int,
     stop_price: float | None,
+    max_abs_return_pct: float,
 ) -> dict:
     signal_row = df.iloc[row_idx]
     entry_row = df.iloc[entry_idx]
@@ -137,9 +167,9 @@ def _event_record(
     }
 
     for horizon in FORWARD_WINDOWS:
-        record[f"ret_{horizon}d_pct"] = _future_return(df, entry_idx, horizon)
+        record[f"ret_{horizon}d_pct"] = _future_return(df, entry_idx, horizon, max_abs_return_pct)
 
-    runup_20, drawdown_20 = _max_runup_drawdown(df, entry_idx, 20)
+    runup_20, drawdown_20 = _max_runup_drawdown(df, entry_idx, 20, max_abs_return_pct)
     record["max_runup_20d_pct"] = runup_20
     record["max_drawdown_20d_pct"] = drawdown_20
     record["stop_hit_5d"] = _stop_hit(df, entry_idx, 5, stop_price)
@@ -147,8 +177,15 @@ def _event_record(
     return record
 
 
-def build_events(df: pd.DataFrame, ticker: str, name: str) -> list[dict]:
+def build_events(
+    df: pd.DataFrame,
+    ticker: str,
+    name: str,
+    event_cooldown_days: int,
+    max_abs_return_pct: float,
+) -> list[dict]:
     events: list[dict] = []
+    last_event_idx: dict[str, int] = {}
 
     for idx in range(200, len(df) - max(FORWARD_WINDOWS)):
         row = df.iloc[idx]
@@ -169,17 +206,53 @@ def build_events(df: pd.DataFrame, ticker: str, name: str) -> list[dict]:
         confirm_high_break = bool(next_row["High"] > row["High"])
 
         for touch_type, stop_ref in touch_types:
+            previous_idx = last_event_idx.get(touch_type)
+            if previous_idx is not None and idx - previous_idx < event_cooldown_days:
+                continue
+
             stop_price = min(float(row["Low"]), stop_ref) if stop_ref is not None else float(row["Low"])
-            events.append(_event_record(df, idx, ticker, name, touch_type, "touch_close", idx, stop_price))
-            events.append(_event_record(df, idx, ticker, name, touch_type, "next_close", next_idx, stop_price))
+            events.append(
+                _event_record(df, idx, ticker, name, touch_type, "touch_close", idx, stop_price, max_abs_return_pct)
+            )
+            events.append(
+                _event_record(
+                    df, idx, ticker, name, touch_type, "next_close", next_idx, stop_price, max_abs_return_pct
+                )
+            )
 
             if touch_type == "ma25":
-                confirmed = bool(row["reclaim_ma25_close"]) or confirm_next_close or confirm_high_break
+                signal_reclaim = bool(row["reclaim_ma25_close"])
+                next_close_above_ma = bool(next_row["Close"] >= next_row["ma25"])
             else:
-                confirmed = bool(row["reclaim_ma75_close"]) or confirm_next_close or confirm_high_break
+                signal_reclaim = bool(row["reclaim_ma75_close"])
+                next_close_above_ma = bool(next_row["Close"] >= next_row["ma75"])
+
+            lower_shadow_pct = float(row["lower_shadow_pct"]) if pd.notna(row["lower_shadow_pct"]) else 0.0
+            volume_ratio_20 = float(row["volume_ratio_20"]) if pd.notna(row["volume_ratio_20"]) else 0.0
+            signal_absorption = bool(row.get("support_reaction_ok", False)) or lower_shadow_pct >= 1.0 or volume_ratio_20 >= 1.2
+            next_hold_low = bool(next_row["Low"] >= row["Low"])
+            next_follow_through = confirm_next_close and bool(next_row["Close"] >= row["Close"]) and next_hold_low
+
+            confirmed = (signal_reclaim and signal_absorption and next_follow_through) or (
+                confirm_high_break and next_follow_through and next_close_above_ma
+            )
 
             if confirmed:
-                events.append(_event_record(df, idx, ticker, name, touch_type, "confirm_close", next_idx, stop_price))
+                events.append(
+                    _event_record(
+                        df,
+                        idx,
+                        ticker,
+                        name,
+                        touch_type,
+                        "confirm_close",
+                        next_idx,
+                        stop_price,
+                        max_abs_return_pct,
+                    )
+                )
+
+            last_event_idx[touch_type] = idx
 
     return events
 
@@ -241,7 +314,13 @@ def run() -> None:
             continue
 
         enriched = calc_indicators(hist)
-        events = build_events(enriched, ticker, name)
+        events = build_events(
+            enriched,
+            ticker,
+            name,
+            event_cooldown_days=max(args.event_cooldown_days, 1),
+            max_abs_return_pct=max(args.max_abs_return_pct, 1.0),
+        )
         all_events.extend(events)
 
     events_df = pd.DataFrame(all_events)
