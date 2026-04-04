@@ -23,6 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backtest MA touch events for medium-term screening.")
     parser.add_argument("--tickers-csv", default="tickers.csv", help="Path to ticker universe CSV.")
     parser.add_argument(
+        "--tickers",
+        default="",
+        help="Optional comma-separated ticker allowlist. Example: 4004.T,4062.T,6146.T",
+    )
+    parser.add_argument(
         "--output-dir",
         default="results/ma_touch_backtests",
         help="Directory for event details and summary CSVs.",
@@ -59,12 +64,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_tickers(path: Path, max_tickers: int, offset: int, limit: int) -> pd.DataFrame:
+def load_tickers(
+    path: Path,
+    max_tickers: int,
+    offset: int,
+    limit: int,
+    selected_tickers: list[str] | None = None,
+) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.dropna(subset=["ticker"]).copy()
     df["ticker"] = df["ticker"].astype(str).str.strip()
     if "name" not in df.columns:
         df["name"] = df["ticker"]
+
+    if selected_tickers:
+        ticker_order = {ticker: i for i, ticker in enumerate(selected_tickers)}
+        matched = df[df["ticker"].isin(ticker_order)].copy()
+        matched["_ticker_order"] = matched["ticker"].map(ticker_order)
+        df = matched.sort_values("_ticker_order").drop(columns="_ticker_order")
+
     offset = max(offset, 0)
     if limit and limit > 0:
         df = df.iloc[offset : offset + limit]
@@ -370,7 +388,19 @@ def run() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tickers_df = load_tickers(tickers_path, args.max_tickers, args.offset, args.limit)
+    selected_tickers = [ticker.strip() for ticker in args.tickers.split(",") if ticker.strip()]
+    tickers_df = load_tickers(
+        tickers_path,
+        args.max_tickers,
+        args.offset,
+        args.limit,
+        selected_tickers=selected_tickers or None,
+    )
+    if selected_tickers:
+        found = set(tickers_df["ticker"].tolist())
+        missing = [ticker for ticker in selected_tickers if ticker not in found]
+        if missing:
+            print(f"warning: requested tickers not found in universe: {', '.join(missing)}")
     all_events: list[dict] = []
 
     slice_label = f"offset{args.offset}"
