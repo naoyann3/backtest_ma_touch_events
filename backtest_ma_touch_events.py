@@ -123,6 +123,17 @@ def _future_return(df: pd.DataFrame, idx: int, horizon: int, max_abs_return_pct:
     return _sanitize_return(raw, max_abs_return_pct)
 
 
+def _return_to_end(df: pd.DataFrame, idx: int, max_abs_return_pct: float) -> tuple[float | None, int]:
+    if idx >= len(df):
+        return None, 0
+    entry = float(df.iloc[idx]["Close"])
+    exit_ = float(df.iloc[-1]["Close"])
+    if entry <= 0:
+        return None, max(len(df) - 1 - idx, 0)
+    raw = (exit_ - entry) / entry * 100
+    return _sanitize_return(raw, max_abs_return_pct), max(len(df) - 1 - idx, 0)
+
+
 def _max_runup_drawdown(
     df: pd.DataFrame, idx: int, horizon: int, max_abs_return_pct: float
 ) -> tuple[float | None, float | None]:
@@ -215,6 +226,9 @@ def _event_record(
     record["max_drawdown_20d_pct"] = drawdown_20
     record["stop_hit_5d"] = _stop_hit(df, entry_idx, 5, stop_price)
     record["stop_hit_20d"] = _stop_hit(df, entry_idx, 20, stop_price)
+    ret_to_end, trading_days_to_end = _return_to_end(df, entry_idx, max_abs_return_pct)
+    record["ret_to_end_pct"] = ret_to_end
+    record["trading_days_to_end"] = trading_days_to_end
     return record
 
 
@@ -367,6 +381,13 @@ def summarize_events(events_df: pd.DataFrame) -> pd.DataFrame:
             row[f"win_rate_{horizon}d_pct"] = round((valid > 0).mean() * 100, 2) if not valid.empty else None
             row[f"avg_{horizon}d_pct"] = round(valid.mean(), 3) if not valid.empty else None
             row[f"median_{horizon}d_pct"] = round(valid.median(), 3) if not valid.empty else None
+
+        to_end = group["ret_to_end_pct"].dropna()
+        row["win_rate_to_end_pct"] = round((to_end > 0).mean() * 100, 2) if not to_end.empty else None
+        row["avg_to_end_pct"] = round(to_end.mean(), 3) if not to_end.empty else None
+        row["median_to_end_pct"] = round(to_end.median(), 3) if not to_end.empty else None
+        to_end_days = group["trading_days_to_end"].dropna()
+        row["avg_trading_days_to_end"] = round(to_end_days.mean(), 1) if not to_end_days.empty else None
 
         drawdown = group["max_drawdown_20d_pct"].dropna()
         runup = group["max_runup_20d_pct"].dropna()
