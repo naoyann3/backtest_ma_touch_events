@@ -15,6 +15,10 @@ on:
         description: "How many tickers to process from offset"
         required: false
         default: "1000"
+      tickers:
+        description: "Optional comma-separated tickers to backtest (example: 4004.T,4062.T)"
+        required: false
+        default: ""
 
 jobs:
   run-backtest:
@@ -43,18 +47,20 @@ jobs:
           echo "RUN_DATE=$(date +%F)" >> $GITHUB_ENV
           echo "RUN_OFFSET=${{ github.event.inputs.offset || '0' }}" >> $GITHUB_ENV
           echo "RUN_LIMIT=${{ github.event.inputs.limit || '1000' }}" >> $GITHUB_ENV
+          echo "RUN_TICKERS=${{ github.event.inputs.tickers || '' }}" >> $GITHUB_ENV
 
       - name: Run MA touch backtest
         run: |
           python backtest_ma_touch_events.py \
             --period "${{ github.event.inputs.period || '5y' }}" \
             --offset "${{ github.event.inputs.offset || '0' }}" \
-            --limit "${{ github.event.inputs.limit || '1000' }}"
+            --limit "${{ github.event.inputs.limit || '1000' }}" \
+            --tickers "${{ github.event.inputs.tickers || '' }}"
 
       - name: Upload backtest results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ma-touch-backtest-results-${{ env.RUN_DATE }}-o${{ env.RUN_OFFSET }}-l${{ env.RUN_LIMIT }}
+          name: ma-touch-backtest-results-${{ env.RUN_DATE }}-o${{ env.RUN_OFFSET }}-l${{ env.RUN_LIMIT }}${{ env.RUN_TICKERS != '' && '-custom' || '' }}
           path: |
             results/ma_touch_backtests/*.csv
