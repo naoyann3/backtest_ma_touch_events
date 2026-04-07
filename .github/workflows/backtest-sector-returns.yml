@@ -1,0 +1,64 @@
+name: Backtest Sector Returns
+
+on:
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "yfinance history period (example: 2y, 5y)"
+        required: false
+        default: "2y"
+      label:
+        description: "Sector or theme label (example: semiconductors)"
+        required: false
+        default: "custom_sector"
+      tickers:
+        description: "Comma-separated tickers to compare"
+        required: true
+        default: ""
+      min_history:
+        description: "Minimum required daily rows per ticker"
+        required: false
+        default: "260"
+
+jobs:
+  run-sector-returns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      TZ: Asia/Tokyo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas yfinance
+
+      - name: Set run date
+        run: |
+          echo "RUN_DATE=$(date +%F)" >> $GITHUB_ENV
+          echo "RUN_LABEL=${{ github.event.inputs.label || 'custom_sector' }}" >> $GITHUB_ENV
+
+      - name: Run sector return comparison
+        run: |
+          python backtest_sector_returns.py \
+            --period "${{ github.event.inputs.period || '2y' }}" \
+            --label "${{ github.event.inputs.label || 'custom_sector' }}" \
+            --tickers "${{ github.event.inputs.tickers }}" \
+            --min-history "${{ github.event.inputs.min_history || '260' }}"
+
+      - name: Upload sector return results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sector-return-results-${{ env.RUN_DATE }}-${{ env.RUN_LABEL }}
+          path: |
+            results/sector_returns/*.csv
